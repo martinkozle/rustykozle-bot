@@ -1,145 +1,65 @@
 mod commands;
-
+use commands::*;
 use dotenv;
 use log;
-use serenity::async_trait;
-use serenity::model::gateway::Ready;
-use serenity::model::id::GuildId;
-use serenity::model::interactions::application_command::{
-    ApplicationCommand, ApplicationCommandInteraction, ApplicationCommandInteractionDataOptionValue,
-};
-use serenity::model::interactions::{Interaction, InteractionResponseType};
-use serenity::prelude::*;
+use poise::serenity_prelude as serenity;
 use std::env;
 
-fn log_command(command: &ApplicationCommandInteraction) {
-    let guild_id = match command.guild_id {
-        Some(GuildId(id)) => id.to_string(),
-        None => "Direct Message".to_string(),
+pub struct Data {}
+type Error = Box<dyn std::error::Error + Send + Sync>;
+type Context<'a> = poise::Context<'a, Data, Error>;
+
+async fn log_command(ctx: Context<'_>) {
+    let guild_name = match ctx.guild() {
+        Some(guild) => guild.name,
+        None => "Direct message".to_string(),
     };
-    let author_tag = match &command.member {
-        Some(member) => member.user.tag(),
-        None => "Unknown".to_string(),
-    };
-    let command_name = &command.data.name;
-    let options_string = command
-        .data
-        .options
+    let author_tag = ctx.author().tag();
+    let command_name = ctx.command().name;
+    let args = ctx
+        .command()
+        .parameters
         .iter()
-        .map(|option| match &option.resolved {
-            Some(ApplicationCommandInteractionDataOptionValue::User(user, _)) => {
-                format!("{}: User(id={}, tag={})", option.name, user.id, user.tag())
-            }
-            Some(ApplicationCommandInteractionDataOptionValue::Channel(channel)) => {
-                format!(
-                    "{}: Channel(id={}, name={})",
-                    option.name,
-                    channel.id,
-                    channel
-                        .name
-                        .to_owned()
-                        .unwrap_or_else(|| "Unknown".to_string())
-                )
-            }
-            Some(ApplicationCommandInteractionDataOptionValue::Role(role)) => {
-                format!("{}: Role(id={}, name={})", option.name, role.id, role.name)
-            }
-            Some(ApplicationCommandInteractionDataOptionValue::Attachment(attatchment)) => {
-                format!(
-                    "{}: Attatchment(filename={}, url={}, content_type={})",
-                    option.name,
-                    attatchment.filename,
-                    attatchment.url,
-                    attatchment
-                        .content_type
-                        .to_owned()
-                        .unwrap_or_else(|| "Unknown".to_string())
-                )
-            }
-            Some(value) => {
-                format!("{}: {:?}", option.name, value)
-            }
-            _ => format!("{}: Unknown", option.name),
-        })
-        .collect::<Vec<String>>()
-        .join(", ");
+        .map(|p| p.name)
+        .collect::<Vec<_>>()
+        .join(" ");
+
     log::info!(
         "[{}] {}: /{} {}",
-        guild_id,
+        guild_name,
         author_tag,
         command_name,
-        options_string
+        args
     );
 }
 
-struct Handler;
-
-#[async_trait]
-impl EventHandler for Handler {
-    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        if let Interaction::ApplicationCommand(command) = interaction {
-            log_command(&command);
-
-            let content = match command.data.name.as_str() {
-                "ping" => commands::ping::handle(&command).await,
-                "id" => commands::id::handle(&command).await,
-                "attachmentinput" => commands::attachmentinput::handle(&command).await,
-                _ => "Command not implemented".to_string(),
-            };
-
-            if let Err(why) = command
-                .create_interaction_response(&ctx.http, |response| {
-                    response
-                        .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|message| message.content(content))
-                })
-                .await
-            {
-                log::error!("Cannot respond to slash command: {}", why);
+async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
+    match error {
+        poise::FrameworkError::Setup { error } => panic!("Failed to start bot: {:?}", error),
+        poise::FrameworkError::Command { error, ctx } => {
+            println!("Error in command `{}`: {:?}", ctx.command().name, error,);
+        }
+        error => {
+            if let Err(e) = poise::builtins::on_error(error).await {
+                println!("Error while handling error: {}", e)
             }
-        } else {
-            log::error!("Received an interaction that is not an application command");
         }
     }
+}
 
-    async fn ready(&self, ctx: Context, ready: Ready) {
-        log::info!("{} is connected!", ready.user.name);
+/// Registers application commands in this guild or globally
+///
+/// Run with no arguments to register in guild, run with argument "global" to register globally.
+#[poise::command(prefix_command, slash_command, hide_in_help)]
+async fn register(
+    ctx: Context<'_>,
+    #[flag]
+    #[description = "Register application commands globally"]
+    global: bool,
+) -> Result<(), Error> {
+    poise::builtins::register_application_commands(ctx, global).await?;
 
-        let guild_id = GuildId(
-            env::var("GUILD_ID")
-                .expect("Expected GUILD_ID in environment")
-                .parse()
-                .expect("GUILD_ID must be an integer"),
-        );
-
-        let commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
-            commands
-                .create_application_command(commands::ping::create)
-                .create_application_command(commands::id::create)
-                .create_application_command(commands::welcome::create)
-                .create_application_command(commands::numberinput::create)
-                .create_application_command(commands::attachmentinput::create)
-        })
-        .await;
-
-        log::info!(
-            "I now have the following guild slash commands: {:#?}",
-            commands
-        );
-
-        let guild_command =
-            ApplicationCommand::create_global_application_command(&ctx.http, |command| {
-                command
-                    .name("wonderful_command")
-                    .description("An amazing command")
-            })
-            .await;
-
-        log::info!(
-            "I created the following global slash command: {:#?}",
-            guild_command
-        );
-    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -151,11 +71,29 @@ async fn main() {
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
 
     log::info!("Discord token: {}", token);
-    let mut client = Client::builder(&token, GatewayIntents::from_bits_truncate(2147483648))
-        .event_handler(Handler)
+
+    poise::Framework::build()
+        .token(token)
+        .intents(
+            serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT,
+        )
+        .user_data_setup(move |_ctx, _ready, _framework| Box::pin(async move { Ok(Data {}) }))
+        .options(poise::FrameworkOptions {
+            prefix_options: poise::PrefixFrameworkOptions {
+                prefix: Some("r!".into()),
+                ..Default::default()
+            },
+            commands: vec![
+                register(),
+                general::hello(),
+                general::age(),
+                general::voiceinfo(),
+            ],
+            on_error: |error| Box::pin(on_error(error)),
+            pre_command: |ctx| Box::pin(async move { log_command(ctx).await }),
+            ..Default::default()
+        })
+        .run()
         .await
-        .expect("Error creating client");
-    if let Err(why) = client.start().await {
-        println!("Client error: {:?}", why);
-    }
+        .unwrap();
 }
