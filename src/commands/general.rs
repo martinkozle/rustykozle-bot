@@ -14,7 +14,7 @@ pub async fn age(
     ctx: Context<'_>,
     #[description = "User"] user: Option<serenity::User>,
 ) -> Result<(), Error> {
-    let user = user.as_ref().unwrap_or(ctx.author());
+    let user = user.as_ref().unwrap_or_else(|| ctx.author());
     ctx.say(format!(
         "{}'s account was created at {}",
         user.name,

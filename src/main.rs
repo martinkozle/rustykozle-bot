@@ -1,7 +1,5 @@
 mod commands;
 use commands::*;
-use dotenv;
-use log;
 use poise::serenity_prelude as serenity;
 use std::env;
 
